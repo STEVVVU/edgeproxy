@@ -1,0 +1,36 @@
+[package]
+name = "edgeproxy"
+version = "0.1.0"
+edition = "2021"
+description = "A bounded, observable HTTP/1.1 reverse proxy and load balancer"
+license = "MIT"
+repository = "https://github.com/STEVVVU/edgeproxy"
+rust-version = "1.78"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.7"
+clap = { version = "4.5", features = ["derive"] }
+httparse = "1.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+proptest = "1.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
