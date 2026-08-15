@@ -45,6 +45,9 @@ try {
         --requests $Requests `
         --concurrency $Concurrency |
         Tee-Object -FilePath "benchmark/latest.json"
+    if ($LASTEXITCODE -ne 0) {
+        throw "loadgen failed with exit code $LASTEXITCODE"
+    }
 }
 finally {
     foreach ($process in $processes) {
@@ -54,4 +57,3 @@ finally {
     }
     Pop-Location
 }
-

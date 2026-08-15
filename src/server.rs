@@ -554,7 +554,7 @@ async fn forward_response(
     }
 
     let idle_timeout = Duration::from_millis(state.config.timeouts.upstream_idle_ms);
-    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let mut remaining = expected_body_bytes.map(|expected| expected.saturating_sub(prefix_length));
     loop {
         if remaining == Some(0) {

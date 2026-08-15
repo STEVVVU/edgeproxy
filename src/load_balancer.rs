@@ -53,6 +53,17 @@ impl Upstream {
         if open_until > now_ms() {
             return false;
         }
+        !self.half_open_probe.load(Ordering::Acquire)
+    }
+
+    fn claim(&self) -> bool {
+        let open_until = self.circuit_open_until_ms.load(Ordering::Acquire);
+        if open_until == 0 {
+            return true;
+        }
+        if open_until > now_ms() {
+            return false;
+        }
         self.half_open_probe
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
@@ -131,13 +142,26 @@ impl LoadBalancer {
         let upstream = match self.policy {
             Policy::RoundRobin => (0..length)
                 .map(|offset| &self.upstreams[(start + offset) % length])
-                .find(|candidate| candidate.available())
+                .find(|candidate| candidate.available() && candidate.claim())
                 .cloned(),
-            Policy::LeastConnections => (0..length)
-                .map(|offset| &self.upstreams[(start + offset) % length])
-                .filter(|candidate| candidate.available())
-                .min_by_key(|candidate| candidate.active_connections())
-                .cloned(),
+            Policy::LeastConnections => {
+                let mut selected = None;
+                for _ in 0..length {
+                    let candidate = (0..length)
+                        .map(|offset| &self.upstreams[(start + offset) % length])
+                        .filter(|candidate| candidate.available())
+                        .min_by_key(|candidate| candidate.active_connections());
+                    match candidate {
+                        Some(candidate) if candidate.claim() => {
+                            selected = Some(Arc::clone(candidate));
+                            break;
+                        }
+                        Some(_) => continue,
+                        None => break,
+                    }
+                }
+                selected
+            }
         }?;
 
         upstream.active_connections.fetch_add(1, Ordering::AcqRel);

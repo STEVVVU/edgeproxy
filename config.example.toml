@@ -1,0 +1,47 @@
+listen = "0.0.0.0:8080"
+metrics_listen = "127.0.0.1:9090"
+policy = "least_connections"
+max_in_flight = 1024
+shutdown_grace_ms = 15000
+preserve_host = false
+
+[limits]
+max_header_bytes = 16384
+max_headers = 64
+max_request_line_bytes = 8192
+max_body_bytes = 1048576
+max_response_header_bytes = 32768
+
+[timeouts]
+request_header_ms = 5000
+request_body_ms = 10000
+connect_ms = 500
+upstream_write_ms = 5000
+upstream_response_header_ms = 5000
+upstream_idle_ms = 15000
+downstream_write_ms = 15000
+
+[retries]
+max_attempts = 2
+retry_statuses = [502, 503, 504]
+
+[circuit_breaker]
+failure_threshold = 5
+open_ms = 10000
+
+[health_check]
+interval_ms = 2000
+timeout_ms = 500
+unhealthy_threshold = 2
+healthy_threshold = 2
+
+[[upstreams]]
+name = "api-a"
+address = "10.0.0.11:8000"
+health_path = "/health"
+
+[[upstreams]]
+name = "api-b"
+address = "10.0.0.12:8000"
+health_path = "/health"
+
