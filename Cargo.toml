@@ -5,23 +5,51 @@ edition = "2021"
 description = "A bounded, observable HTTP/1.1 reverse proxy and load balancer"
 license = "MIT"
 repository = "https://github.com/STEVVVU/edgeproxy"
-rust-version = "1.78"
+rust-version = "1.86"
 
 [dependencies]
 anyhow = "1.0"
 bytes = "1.7"
 clap = { version = "4.5", features = ["derive"] }
 httparse = "1.9"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+# `ring` (not aws-lc-rs) keeps the build free of cmake/NASM, which matters for the
+# distroless container build and for contributors on Windows.
+rustls = { version = "0.23", default-features = false, features = [
+    "logging",
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+webpki-roots = "1.0"
 
 [dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.5"
+rcgen = "0.14"
+
+[[bench]]
+name = "request_parsing"
+harness = false
+
+[[bench]]
+name = "load_balancer"
+harness = false
 
 [profile.release]
 lto = "thin"

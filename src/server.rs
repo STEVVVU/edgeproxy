@@ -5,12 +5,14 @@ use std::time::Instant as StdInstant;
 
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
+use rustls::{ClientConfig, ServerConfig};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{timeout, timeout_at, Duration, Instant};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -19,20 +21,54 @@ use crate::http::{
 };
 use crate::load_balancer::{LoadBalancer, SelectedUpstream, Upstream};
 use crate::metrics::{Metrics, SharedMetrics};
+use crate::tls::{self, MaybeTlsStream};
 
 const COPY_BUFFER_SIZE: usize = 16 * 1024;
 const OVERLOADED_RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
     content-type: text/plain\r\ncontent-length: 18\r\nconnection: close\r\n\r\nproxy at capacity\n";
 
+/// Any downstream or upstream transport edgeproxy speaks HTTP/1.1 over.
+///
+/// Implemented by `TcpStream` and by [`MaybeTlsStream`], which lets the request
+/// path stay generic instead of duplicating itself per transport.
+pub trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for S {}
+
 struct State {
     config: Arc<Config>,
     balancer: Arc<LoadBalancer>,
     metrics: SharedMetrics,
+    /// Present only when at least one upstream sets `tls = true`.
+    upstream_tls: Option<UpstreamTls>,
+}
+
+/// Client-side TLS configurations for backend re-encryption.
+///
+/// Two configs because verification policy is per-upstream: the strict one is
+/// shared by all verifying upstreams, and `insecure` is built only if some
+/// upstream opts out of verification.
+struct UpstreamTls {
+    verifying: Arc<ClientConfig>,
+    insecure: Option<Arc<ClientConfig>>,
+}
+
+impl UpstreamTls {
+    fn connector_for(&self, upstream: &Upstream) -> TlsConnector {
+        let config = if upstream.config.tls_insecure_skip_verify {
+            self.insecure.as_ref().unwrap_or(&self.verifying)
+        } else {
+            &self.verifying
+        };
+        TlsConnector::from(Arc::clone(config))
+    }
 }
 
 pub struct BoundProxy {
     listener: TcpListener,
     metrics_listener: TcpListener,
+    /// The HTTPS listener and its rustls config, when `[tls]` is configured.
+    tls_listener: Option<(TcpListener, Arc<ServerConfig>)>,
     state: Arc<State>,
 }
 
@@ -47,14 +83,62 @@ impl BoundProxy {
             .with_context(|| {
                 format!("failed to bind metrics listener {}", config.metrics_listen)
             })?;
+
+        // Certificates are read here so a bad path or unparseable PEM fails
+        // startup rather than the first HTTPS connection.
+        let tls_listener = match &config.tls {
+            Some(settings) => {
+                let server_config = tls::server_config(settings)?;
+                let bound = TcpListener::bind(settings.listen)
+                    .await
+                    .with_context(|| format!("failed to bind TLS listener {}", settings.listen))?;
+                Some((bound, server_config))
+            }
+            None => None,
+        };
+
+        let upstream_tls = if config.has_tls_upstreams() {
+            let insecure_upstreams: Vec<&str> = config
+                .upstreams
+                .iter()
+                .filter(|upstream| upstream.tls && upstream.tls_insecure_skip_verify)
+                .map(|upstream| upstream.name.as_str())
+                .collect();
+            if !insecure_upstreams.is_empty() {
+                warn!(
+                    event = "upstream_tls_verification_disabled",
+                    upstreams = ?insecure_upstreams,
+                    "upstream certificate verification is disabled; do not use in production"
+                );
+            }
+            let insecure = if insecure_upstreams.is_empty() {
+                None
+            } else {
+                Some(tls::upstream_client_config(true)?)
+            };
+            // Validate every configured SNI name up front for the same reason
+            // certificates are loaded eagerly.
+            for upstream in config.upstreams.iter().filter(|upstream| upstream.tls) {
+                tls::upstream_server_name(upstream)?;
+            }
+            Some(UpstreamTls {
+                verifying: tls::upstream_client_config(false)?,
+                insecure,
+            })
+        } else {
+            None
+        };
+
         let balancer = Arc::new(LoadBalancer::new(config.upstreams.clone(), config.policy));
         Ok(Self {
             listener,
             metrics_listener,
+            tls_listener,
             state: Arc::new(State {
                 config: Arc::new(config),
                 balancer,
-                metrics: Arc::new(Metrics::default()),
+                metrics: Arc::new(Metrics::new()),
+                upstream_tls,
             }),
         })
     }
@@ -69,12 +153,23 @@ impl BoundProxy {
             .context("metrics local address")
     }
 
+    /// The bound HTTPS address, or `None` when TLS is not configured.
+    ///
+    /// Useful for tests that bind port 0.
+    pub fn tls_addr(&self) -> Result<Option<SocketAddr>> {
+        self.tls_listener
+            .as_ref()
+            .map(|(listener, _)| listener.local_addr().context("TLS local address"))
+            .transpose()
+    }
+
     pub async fn run<F>(self, shutdown_signal: F) -> Result<()>
     where
         F: Future<Output = ()> + Send,
     {
         let proxy_addr = self.listen_addr()?;
         let metrics_addr = self.metrics_addr()?;
+        let tls_addr = self.tls_addr()?;
         let admission = Arc::new(Semaphore::new(self.state.config.max_in_flight));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let metrics_task = spawn_metrics_server(
@@ -86,13 +181,22 @@ impl BoundProxy {
         let mut connections = JoinSet::new();
         tokio::pin!(shutdown_signal);
 
+        // `select!` needs a future to poll even when TLS is disabled. Splitting
+        // the option lets the TLS arm be disabled with a guard instead.
+        let (tls_listener, tls_config) = match self.tls_listener {
+            Some((listener, config)) => (Some(listener), Some(config)),
+            None => (None, None),
+        };
+
         info!(
             event = "startup",
             listen = %proxy_addr,
             metrics_listen = %metrics_addr,
+            tls_listen = tls_addr.map(|address| address.to_string()).as_deref().unwrap_or("-"),
             policy = ?self.state.config.policy,
             upstreams = self.state.config.upstreams.len(),
             max_in_flight = self.state.config.max_in_flight,
+            tls_upstreams = self.state.config.has_tls_upstreams(),
             "edgeproxy started"
         );
 
@@ -118,6 +222,52 @@ impl BoundProxy {
                     let state = Arc::clone(&self.state);
                     connections.spawn(async move {
                         let _permit = permit;
+                        let mut stream = MaybeTlsStream::Plain(stream);
+                        if let Err(error) = handle_connection(&mut stream, peer, state).await {
+                            debug!(event = "connection_error", client = %peer, %error);
+                        }
+                    });
+                }
+                // Only polled when a TLS listener exists.
+                accepted = accept_optional(tls_listener.as_ref()), if tls_listener.is_some() => {
+                    let (mut stream, peer) = match accepted {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            warn!(event = "tls_accept_error", %error);
+                            continue;
+                        }
+                    };
+                    let Ok(permit) = Arc::clone(&admission).try_acquire_owned() else {
+                        self.state.metrics.reject_backpressure();
+                        // Rejected before the handshake: a TLS client cannot read
+                        // this plaintext response, but the bounded read-and-close
+                        // still avoids an unbounded rejection queue.
+                        reject_overloaded(&mut stream).await;
+                        continue;
+                    };
+                    let state = Arc::clone(&self.state);
+                    let acceptor = TlsAcceptor::from(Arc::clone(
+                        tls_config.as_ref().expect("TLS config exists with a TLS listener"),
+                    ));
+                    connections.spawn(async move {
+                        let _permit = permit;
+                        // The handshake is bounded by the request-header timeout:
+                        // it is the first phase of reading a request, so a stalled
+                        // handshake must not hold a permit indefinitely.
+                        let handshake_timeout =
+                            Duration::from_millis(state.config.timeouts.request_header_ms);
+                        let accepted = match timeout(handshake_timeout, acceptor.accept(stream)).await {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(error)) => {
+                                debug!(event = "tls_handshake_failed", client = %peer, %error);
+                                return;
+                            }
+                            Err(_) => {
+                                debug!(event = "tls_handshake_timeout", client = %peer);
+                                return;
+                            }
+                        };
+                        let mut stream = MaybeTlsStream::Tls(Box::new(accepted.into()));
                         if let Err(error) = handle_connection(&mut stream, peer, state).await {
                             debug!(event = "connection_error", client = %peer, %error);
                         }
@@ -156,6 +306,20 @@ impl BoundProxy {
     }
 }
 
+/// Accepts from an optional listener.
+///
+/// When the listener is absent this future never completes; the `select!` arm
+/// that calls it is guarded by `tls_listener.is_some()`, so it is never polled
+/// in that case.
+async fn accept_optional(
+    listener: Option<&TcpListener>,
+) -> std::io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn reject_overloaded(stream: &mut TcpStream) {
     let mut discard = [0_u8; 1024];
     let _ = timeout(Duration::from_millis(25), stream.read(&mut discard)).await;
@@ -173,12 +337,13 @@ async fn finish_background_task(mut task: JoinHandle<()>) {
     }
 }
 
-async fn handle_connection(
-    downstream: &mut TcpStream,
+async fn handle_connection<S: Transport>(
+    downstream: &mut MaybeTlsStream<S>,
     peer: SocketAddr,
     state: Arc<State>,
 ) -> Result<()> {
     let started = StdInstant::now();
+    let scheme = if downstream.is_tls() { "https" } else { "http" };
     let _active = state.metrics.request_started();
     let request = match read_request(downstream, &state.config.limits, &state.config.timeouts).await
     {
@@ -191,6 +356,7 @@ async fn handle_connection(
             info!(
                 event = "access",
                 client = %peer,
+                scheme,
                 method = "-",
                 target = "-",
                 status,
@@ -234,6 +400,7 @@ async fn handle_connection(
     info!(
         event = "access",
         client = %peer,
+        scheme,
         method,
         target,
         status,
@@ -261,8 +428,8 @@ struct ProxyFailure {
     response_started: bool,
 }
 
-async fn proxy_request(
-    downstream: &mut TcpStream,
+async fn proxy_request<S: Transport>(
+    downstream: &mut MaybeTlsStream<S>,
     peer: SocketAddr,
     request: &Request,
     state: &State,
@@ -379,7 +546,8 @@ fn record_upstream_failure(upstream: &Upstream, state: &State) {
 }
 
 struct AttemptResponse {
-    stream: TcpStream,
+    /// Plaintext or TLS, depending on the upstream's `tls` setting.
+    stream: MaybeTlsStream<TcpStream>,
     head: ResponseHead,
     body_prefix: BytesMut,
     selected: SelectedUpstream,
@@ -421,10 +589,10 @@ async fn perform_attempt(
     request: &Request,
     peer: SocketAddr,
     state: &State,
-) -> Result<(TcpStream, ResponseHead, BytesMut), AttemptError> {
+) -> Result<(MaybeTlsStream<TcpStream>, ResponseHead, BytesMut), AttemptError> {
     let upstream = selected.upstream();
     let connect_timeout = Duration::from_millis(state.config.timeouts.connect_ms);
-    let mut stream = timeout(connect_timeout, TcpStream::connect(upstream.config.address))
+    let tcp_stream = timeout(connect_timeout, TcpStream::connect(upstream.config.address))
         .await
         .map_err(|_| AttemptError {
             phase: FailurePhase::BeforeSend,
@@ -436,10 +604,59 @@ async fn perform_attempt(
             kind: AttemptErrorKind::Connect,
             message: format!("connect to {} failed: {error}", upstream.config.name),
         })?;
-    let _ = stream.set_nodelay(true);
+    let _ = tcp_stream.set_nodelay(true);
 
+    // The upstream handshake happens before any request bytes are written, so a
+    // handshake failure stays in the `BeforeSend` phase and is safe to retry
+    // for any method, idempotent or not.
+    let mut stream = if upstream.config.tls {
+        let tls = state.upstream_tls.as_ref().ok_or_else(|| AttemptError {
+            phase: FailurePhase::BeforeSend,
+            kind: AttemptErrorKind::Connect,
+            message: format!(
+                "upstream {} requires TLS but no client config was built",
+                upstream.config.name
+            ),
+        })?;
+        let server_name =
+            tls::upstream_server_name(&upstream.config).map_err(|error| AttemptError {
+                phase: FailurePhase::BeforeSend,
+                kind: AttemptErrorKind::Connect,
+                message: format!("invalid TLS name for {}: {error}", upstream.config.name),
+            })?;
+        let connector = tls.connector_for(upstream);
+        let handshake = timeout(connect_timeout, connector.connect(server_name, tcp_stream))
+            .await
+            .map_err(|_| AttemptError {
+                phase: FailurePhase::BeforeSend,
+                kind: AttemptErrorKind::Timeout,
+                message: format!("TLS handshake timeout to {}", upstream.config.name),
+            })?
+            .map_err(|error| AttemptError {
+                phase: FailurePhase::BeforeSend,
+                kind: AttemptErrorKind::Connect,
+                message: format!(
+                    "TLS handshake with {} failed: {error}",
+                    upstream.config.name
+                ),
+            })?;
+        MaybeTlsStream::Tls(Box::new(handshake.into()))
+    } else {
+        MaybeTlsStream::Plain(tcp_stream)
+    };
+
+    // For a TLS upstream the authority must match the name presented in SNI and
+    // verified against the certificate, otherwise the origin sees a `Host` that
+    // disagrees with the TLS identity. Plaintext upstreams keep the previous
+    // address-literal behavior.
+    let authority = match (upstream.config.tls, &upstream.config.tls_server_name) {
+        (true, Some(server_name)) => {
+            format!("{}:{}", server_name, upstream.config.address.port())
+        }
+        _ => upstream.config.address.to_string(),
+    };
     let request_bytes = request.upstream_bytes(
-        &upstream.config.address.to_string(),
+        &authority,
         &peer.ip().to_string(),
         state.config.preserve_host,
     );
@@ -519,8 +736,8 @@ async fn perform_attempt(
     Ok((stream, head, buffer))
 }
 
-async fn forward_response(
-    downstream: &mut TcpStream,
+async fn forward_response<S: Transport>(
+    downstream: &mut MaybeTlsStream<S>,
     response: &mut AttemptResponse,
     state: &State,
 ) -> Result<usize, ForwardError> {
@@ -626,7 +843,7 @@ fn spawn_health_checks(state: Arc<State>, mut shutdown: watch::Receiver<bool>) -
                         let upstream = Arc::clone(upstream);
                         let state = Arc::clone(&state);
                         checks.spawn(async move {
-                            let success = health_probe(&upstream, &state.config).await;
+                            let success = health_probe(&upstream, &state).await;
                             state.metrics.health_check(success);
                             upstream.record_health_result(
                                 success,
@@ -655,13 +872,42 @@ fn spawn_health_checks(state: Arc<State>, mut shutdown: watch::Receiver<bool>) -
     })
 }
 
-async fn health_probe(upstream: &Upstream, config: &Config) -> bool {
+/// Probes one upstream's health endpoint.
+///
+/// TLS upstreams are probed over TLS with the same client config the request
+/// path uses, so a certificate problem shows up as an unhealthy upstream rather
+/// than as per-request 502s.
+async fn health_probe(upstream: &Upstream, state: &State) -> bool {
+    let config = &state.config;
     let whole_timeout = Duration::from_millis(config.health_check.timeout_ms);
     timeout(whole_timeout, async {
-        let mut stream = TcpStream::connect(upstream.config.address).await?;
+        let tcp_stream = TcpStream::connect(upstream.config.address).await?;
+        let (mut stream, authority) = if upstream.config.tls {
+            let Some(tls) = state.upstream_tls.as_ref() else {
+                return Ok::<bool, std::io::Error>(false);
+            };
+            let Ok(server_name) = tls::upstream_server_name(&upstream.config) else {
+                return Ok(false);
+            };
+            let authority = match &upstream.config.tls_server_name {
+                Some(name) => format!("{}:{}", name, upstream.config.address.port()),
+                None => upstream.config.address.to_string(),
+            };
+            let handshake = tls
+                .connector_for(upstream)
+                .connect(server_name, tcp_stream)
+                .await?;
+            (
+                MaybeTlsStream::Tls(Box::new(handshake.into())),
+                authority,
+            )
+        } else {
+            let authority = upstream.config.address.to_string();
+            (MaybeTlsStream::Plain(tcp_stream), authority)
+        };
         let request = format!(
             "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\n\r\n",
-            upstream.config.health_path, upstream.config.address
+            upstream.config.health_path, authority
         );
         stream.write_all(request.as_bytes()).await?;
         let mut buffer = [0_u8; 1024];

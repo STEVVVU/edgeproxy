@@ -5,3 +5,12 @@
 *.log
 *.pid
 benchmark/latest.json
+benchmark/latest-tls.json
+
+# Certificates and keys are never committed. The TLS tests generate throwaway
+# self-signed pairs into a temp directory at run time, and the benchmark script
+# generates one into benchmark/tls/, so nothing here needs versioning.
+benchmark/tls/
+*.pem
+*.crt
+*.key

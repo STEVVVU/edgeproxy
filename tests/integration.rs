@@ -95,6 +95,8 @@ fn test_config(upstreams: Vec<SocketAddr>, policy: Policy) -> Config {
     Config {
         listen: "127.0.0.1:0".parse().expect("address"),
         metrics_listen: "127.0.0.1:0".parse().expect("address"),
+        // TLS is covered by tests/tls.rs; these cases exercise the plaintext path.
+        tls: None,
         policy,
         max_in_flight: 32,
         shutdown_grace_ms: 1000,
@@ -136,6 +138,9 @@ fn test_config(upstreams: Vec<SocketAddr>, policy: Policy) -> Config {
                 name: format!("upstream-{index}"),
                 address,
                 health_path: "/health".to_owned(),
+                tls: false,
+                tls_server_name: None,
+                tls_insecure_skip_verify: false,
             })
             .collect(),
     }

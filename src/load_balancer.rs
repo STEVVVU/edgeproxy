@@ -206,11 +206,17 @@ mod tests {
                 name: "a".to_owned(),
                 address: "127.0.0.1:9001".parse().expect("address"),
                 health_path: "/health".to_owned(),
+                tls: false,
+                tls_server_name: None,
+                tls_insecure_skip_verify: false,
             },
             UpstreamConfig {
                 name: "b".to_owned(),
                 address: "127.0.0.1:9002".parse().expect("address"),
                 health_path: "/health".to_owned(),
+                tls: false,
+                tls_server_name: None,
+                tls_insecure_skip_verify: false,
             },
         ]
     }

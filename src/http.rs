@@ -3,8 +3,7 @@ use std::str;
 
 use bytes::{Buf, BytesMut};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{timeout_at, Duration, Instant};
 
 use crate::config::{Limits, Timeouts};
@@ -224,11 +223,18 @@ pub fn parse_request_head(input: &[u8], limits: &Limits) -> Result<RequestHead, 
     })
 }
 
-pub async fn read_request(
-    stream: &mut TcpStream,
+/// Reads one request from any byte stream (plaintext TCP or TLS).
+///
+/// Generic over the transport so TLS termination reuses the exact same framing
+/// and validation path as plaintext; there is no second parser to keep in sync.
+pub async fn read_request<S>(
+    stream: &mut S,
     limits: &Limits,
     timeouts: &Timeouts,
-) -> Result<Request, ParseError> {
+) -> Result<Request, ParseError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let header_deadline = Instant::now() + Duration::from_millis(timeouts.request_header_ms);
     let mut buffer = BytesMut::with_capacity(limits.max_header_bytes.min(4096));
 
@@ -277,7 +283,10 @@ pub async fn read_request(
     })
 }
 
-pub async fn write_error(stream: &mut TcpStream, status: u16, message: &str) {
+pub async fn write_error<S>(stream: &mut S, status: u16, message: &str)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let reason = reason_phrase(status);
     let body = format!("{status} {reason}\n{message}\n");
     let response = format!(
