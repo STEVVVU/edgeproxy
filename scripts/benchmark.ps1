@@ -1,16 +1,27 @@
 param(
     [int]$Requests = 20000,
-    [int]$Concurrency = 128
+    [int]$Concurrency = 128,
+    # Also measure the HTTPS listener. Requires a certificate, which is generated
+    # automatically into benchmark/tls/ if absent.
+    [switch]$IncludeTls
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "TestCertificate.ps1")
+
 $processes = @()
 
 Push-Location $root
 try {
     cargo build --release --bins --examples
     New-Item -ItemType Directory -Force -Path "benchmark" | Out-Null
+
+    $configuration = "benchmark/edgeproxy.bench.toml"
+    if ($IncludeTls) {
+        New-TestCertificate -Directory (Join-Path $root "benchmark/tls")
+        $configuration = "benchmark/edgeproxy.bench.tls.toml"
+    }
 
     $fixtureA = Start-Process `
         -FilePath "target/release/examples/fixture_upstream.exe" `
@@ -32,7 +43,7 @@ try {
 
     $proxy = Start-Process `
         -FilePath "target/release/edgeproxy.exe" `
-        -ArgumentList "--config", "benchmark/edgeproxy.bench.toml" `
+        -ArgumentList "--config", $configuration `
         -RedirectStandardOutput "benchmark/edgeproxy.log" `
         -RedirectStandardError "benchmark/edgeproxy.err.log" `
         -WindowStyle Hidden `
@@ -40,6 +51,8 @@ try {
     $processes += $proxy
 
     Start-Sleep -Seconds 2
+
+    Write-Host "`n=== Plaintext HTTP ==="
     & "target/release/loadgen.exe" `
         --address "127.0.0.1:18080" `
         --requests $Requests `
@@ -47,6 +60,20 @@ try {
         Tee-Object -FilePath "benchmark/latest.json"
     if ($LASTEXITCODE -ne 0) {
         throw "loadgen failed with exit code $LASTEXITCODE"
+    }
+
+    if ($IncludeTls) {
+        Write-Host "`n=== TLS (HTTPS) ==="
+        & "target/release/loadgen.exe" `
+            --address "127.0.0.1:18443" `
+            --tls `
+            --tls-server-name "localhost" `
+            --requests $Requests `
+            --concurrency $Concurrency |
+            Tee-Object -FilePath "benchmark/latest-tls.json"
+        if ($LASTEXITCODE -ne 0) {
+            throw "TLS loadgen failed with exit code $LASTEXITCODE"
+        }
     }
 }
 finally {

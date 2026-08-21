@@ -1,0 +1,19 @@
+# Optional Prometheus configuration for the local demo topology.
+#
+# Nothing in this repo runs Prometheus; this is here so that an operator who
+# already has a Prometheus binary can point it at the demo:
+#
+#   .\scripts\demo.ps1
+#   prometheus --config.file=demo/prometheus.yml --storage.tsdb.retention.time=1h
+#
+# The single target is edgeproxy's own metrics listener, which serves the
+# Prometheus text exposition format at /metrics.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: edgeproxy
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

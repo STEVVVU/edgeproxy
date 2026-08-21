@@ -22,6 +22,21 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --locked --all-targets
+      # Benchmarks are compiled but not measured: CI runners are too noisy for
+      # meaningful timings. This only guards against a bench that stops building.
+      - name: Benchmarks compile
+        run: cargo build --locked --benches
+
+  msrv:
+    # Raised from 1.78 to 1.86 by criterion 0.7, the highest MSRV among the new
+    # dependencies. rustls/tokio-rustls/metrics themselves only need 1.71.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build at MSRV
+        run: cargo build --locked --all-targets
 
   dependency-audit:
     runs-on: ubuntu-latest
@@ -30,4 +45,3 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
