@@ -33,6 +33,22 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "TestCertificate.ps1")
 
+# Writes the generated config as UTF-8 with no byte-order mark. Windows
+# PowerShell's `Set-Content -Encoding utf8` prepends a BOM; the TOML parser
+# tolerates it, but a BOM in a generated config is still noise nobody expects.
+function Set-ConfigFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)][string]$Content
+    )
+
+    process {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $resolved = Join-Path (Get-Location).Path $Path
+        [System.IO.File]::WriteAllText($resolved, $Content, $utf8NoBom)
+    }
+}
+
 $processes = @()
 $listen = "127.0.0.1:8080"
 $tlsListen = "127.0.0.1:8443"
@@ -60,6 +76,7 @@ try {
 name = "fixture-$id"
 address = "127.0.0.1:$port"
 health_path = "/health"
+
 "@)
     }
 
@@ -72,6 +89,7 @@ health_path = "/health"
 listen = "$tlsListen"
 certificate = "demo/tls/test-only-localhost.crt"
 private_key = "demo/tls/test-only-localhost.key"
+
 "@
     }
 
@@ -118,7 +136,7 @@ timeout_ms = 500
 unhealthy_threshold = 2
 healthy_threshold = 2
 $($upstreamSections -join "")
-"@ | Set-Content -Path $configuration -Encoding utf8
+"@ | Set-ConfigFile -Path $configuration
 
     for ($index = 0; $index -lt $Upstreams; $index++) {
         $id = [char]([int][char]'a' + $index)
