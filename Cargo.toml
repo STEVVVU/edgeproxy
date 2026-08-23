@@ -14,8 +14,8 @@ clap = { version = "4.5", features = ["derive"] }
 httparse = "1.9"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# `ring` (not aws-lc-rs) keeps the build free of cmake/NASM, which matters for
-# contributors on Windows.
+# `ring` (not aws-lc-rs) keeps the build free of cmake/NASM, which matters for the
+# distroless container build and for contributors on Windows.
 rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "ring",

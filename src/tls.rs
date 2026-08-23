@@ -2,7 +2,7 @@
 //!
 //! edgeproxy uses the pure-Rust `ring` cryptographic provider rather than
 //! `aws-lc-rs`. Both are supported by rustls 0.23, but `ring` builds without
-//! cmake or NASM, which keeps contributor setup simple on Windows in particular.
+//! cmake or NASM, which keeps the container image and contributor setup simple.
 //! Neither provider requires `unsafe` in this crate, so `unsafe_code = "forbid"`
 //! still holds.
 //!
@@ -160,9 +160,8 @@ pub fn server_config(listener: &TlsListener) -> Result<Arc<ServerConfig>> {
 
 /// Builds the rustls client configuration used for upstream re-encryption.
 ///
-/// Trust anchors come from the `webpki-roots` bundle rather than the platform
-/// store, so verification behaves identically on every host regardless of the
-/// OS CA configuration.
+/// Trust anchors come from the `webpki-roots` bundle so behavior is identical
+/// across the host and the distroless container, which ships no CA store.
 /// `insecure_skip_verify` exists for self-signed lab upstreams and is refused
 /// unless the operator opts in per upstream; it is logged loudly at startup.
 pub fn upstream_client_config(insecure_skip_verify: bool) -> Result<Arc<ClientConfig>> {

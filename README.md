@@ -63,8 +63,9 @@ check ejecting it. With `-Tls` the script also generates a throwaway self-signed
 certificate and serves `https://127.0.0.1:8443/` (`curl -k`). The generated
 config is written to `demo/edgeproxy.demo.toml` for inspection.
 
-Everything runs as a plain local process. There is no container tooling in this
-repo, so nothing here depends on a container runtime being installed.
+Everything runs as a plain local process, so this path depends on nothing but a
+Rust toolchain. The [Containers](#containers) section below runs the same
+topology under Docker Compose when a container runtime is available.
 
 ### Benchmarks
 
@@ -187,6 +188,36 @@ prometheus --config.file=demo/prometheus.yml --storage.tsdb.retention.time=1h
 
 Point `scrape_configs[].static_configs[].targets` at your own `metrics_listen`
 address to scrape a real deployment.
+
+## Containers
+
+A multi-stage `Dockerfile` compiles the proxy with a full Rust toolchain and
+ships only the stripped binary onto `gcr.io/distroless/cc-debian12:nonroot` — no
+shell, no package manager, running as the unprivileged `nonroot` user. Because
+rustls uses the pure-Rust `ring` provider, the runtime image needs no OpenSSL.
+
+`compose.yaml` runs the containerized counterpart of `scripts/demo.ps1`:
+edgeproxy in front of two upstream fixtures, scraped by Prometheus, with an init
+container generating a throwaway self-signed certificate into a volume so no key
+material is committed. The proxy and fixtures run read-only with all capabilities
+dropped.
+
+```bash
+docker compose up --build
+
+curl http://localhost:8080/           # proxied, round robin over both upstreams
+curl -k https://localhost:8443/       # same, TLS-terminated (self-signed)
+curl http://localhost:9090/metrics    # edgeproxy metrics
+```
+
+Upstreams are pinned to static IPs on a user-defined bridge because
+`upstreams[].address` is a `SocketAddr`: edgeproxy performs no DNS resolution, so
+compose service names cannot be used there.
+
+The image build is exercised by the `container` CI job (`docker buildx build`,
+`push: false`), so a green check is the evidence that it compiles and assembles.
+It was not built or run on the author's local machine — the CI runner is the only
+environment in which the image has been produced.
 
 ## Design Boundaries
 
