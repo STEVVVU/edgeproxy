@@ -10,6 +10,29 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "TestCertificate.ps1")
 
+# Echoes the report to the console and writes it as UTF-8 with no byte-order
+# mark. `Tee-Object -FilePath` in Windows PowerShell 5.1 writes UTF-16LE with a
+# BOM, which no JSON parser accepts, so the saved reports were unreadable as
+# JSON even though they looked correct on screen. Mirrors demo.ps1's
+# Set-ConfigFile for the same reason.
+function Save-Report {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(ValueFromPipeline = $true)][string]$Line
+    )
+
+    begin { $lines = New-Object System.Collections.Generic.List[string] }
+    process {
+        Write-Host $Line
+        $lines.Add($Line)
+    }
+    end {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $resolved = Join-Path (Get-Location).Path $Path
+        [System.IO.File]::WriteAllText($resolved, ($lines -join "`n") + "`n", $utf8NoBom)
+    }
+}
+
 $processes = @()
 
 Push-Location $root
@@ -57,7 +80,7 @@ try {
         --address "127.0.0.1:18080" `
         --requests $Requests `
         --concurrency $Concurrency |
-        Tee-Object -FilePath "benchmark/latest.json"
+        Save-Report -Path "benchmark/latest.json"
     if ($LASTEXITCODE -ne 0) {
         throw "loadgen failed with exit code $LASTEXITCODE"
     }
@@ -70,7 +93,7 @@ try {
             --tls-server-name "localhost" `
             --requests $Requests `
             --concurrency $Concurrency |
-            Tee-Object -FilePath "benchmark/latest-tls.json"
+            Save-Report -Path "benchmark/latest-tls.json"
         if ($LASTEXITCODE -ne 0) {
             throw "TLS loadgen failed with exit code $LASTEXITCODE"
         }
