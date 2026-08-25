@@ -70,13 +70,27 @@ topology under Docker Compose when a container runtime is available.
 ### Benchmarks
 
 ```powershell
-.\scripts\benchmark.ps1 -Requests 5000 -Concurrency 64 -IncludeTls
+.\scripts\benchmark.ps1 -Requests 300 -Concurrency 1 -IncludeTls
 ```
 
 Builds release binaries, starts two hidden local fixture servers and the proxy,
 runs the included load generator against the plaintext listener and — with
 `-IncludeTls` — the HTTPS one, writes `benchmark/latest.json` and
 `benchmark/latest-tls.json`, and always terminates its child processes.
+
+**Measured TLS overhead: +2.36 ms per request at p50** (plaintext 3.97 ms → TLS
+6.27 ms), median of 13 paired runs, positive in all 13. Every request performs a
+full handshake because the proxy uses one connection per request, so this is the
+worst case for TLS and the best case for isolating its cost: session resumption
+and connection reuse would amortize it away.
+
+The low concurrency above is deliberate. Concurrent runs on the author's machine
+are dominated by Windows ephemeral-port exhaustion — two ports per request
+against a 16,384-port pool — which produced a 7x measurement envelope and even an
+implausible "TLS is faster" reading. Only the serial figure is stable enough to
+publish. Both the numbers and the reason the concurrent ones are withheld are in
+[benchmark/RESULTS.md](benchmark/RESULTS.md), along with the withdrawal of the
+pre-TLS figures this file used to quote.
 
 `criterion` covers the microbenchmark side (request parsing and the
 load-balancer pick path) where socket and scheduler noise would otherwise
@@ -228,9 +242,12 @@ requests. Responses support fixed length, chunked pass-through, or
 close-delimited bodies.
 
 Each downstream request uses one upstream TCP connection and closes both sides
-after the response. TLS termination, HTTP/2, WebSockets, upstream connection
-pooling, dynamic config reload, and distributed circuit state are not
-implemented. These are explicit scope limits, not hidden benchmark caveats.
+after the response. HTTP/2, WebSockets, downstream keep-alive, upstream
+connection pooling, TLS session resumption, dynamic config reload, and
+distributed circuit state are not implemented. These are explicit scope limits,
+not hidden benchmark caveats — and the connection-per-request model is why the
+measured TLS overhead above is a per-request cost rather than a per-connection
+one amortized across many.
 
 See [docs/protocol-and-failure-model.md](docs/protocol-and-failure-model.md) for
 the wire profile, retry matrix, health/circuit behavior, and failure semantics.
@@ -256,9 +273,13 @@ unbounded task queue.
 - Implemented active health checks, per-upstream circuit breakers, phase-aware
   safe retries, graceful shutdown, structured access logs, and Prometheus
   metrics.
-- Validated protocol and failure behavior with 13 deterministic
+- Terminated TLS with `rustls` including SNI certificate selection and upstream
+  re-encryption, and quantified the cost at +2.36 ms per request at p50 over 13
+  paired runs.
+- Validated protocol and failure behavior with 36 deterministic
   unit/property/integration tests, a libFuzzer target, CI quality gates, and a
-  reproducible local load harness with documented saturation results.
+  reproducible local load harness whose methodology documents which figures are
+  measurable on the test machine and which are not.
 
 ## License
 
