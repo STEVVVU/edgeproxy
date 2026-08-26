@@ -1,0 +1,46 @@
+# Normalize every text file to LF in the repository. Without this the tree's
+# line endings depend on each clone's `core.autocrlf`, which is a local setting:
+# this checkout happens to use `input`, so nothing CRLF was ever committed, but a
+# contributor with the Windows default (`true`) would commit CRLF and produce a
+# whole-file diff. Declaring it here makes the normalization a property of the
+# repository instead of a property of whoever cloned it.
+#
+# Working-tree endings are deliberately left to the platform: `eol=lf` is not
+# forced, so Windows tools that prefer CRLF still get it on checkout while the
+# stored blobs stay LF.
+* text=auto eol=lf
+
+# Windows PowerShell 5.1 parses LF-only scripts correctly, including the
+# here-strings scripts/demo.ps1 uses to generate its config (verified), so the
+# harnesses are safe to store and check out as LF.
+*.ps1 text eol=lf
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+
+# Lockfiles are generated. Keeping them LF and non-diffable keeps dependency
+# bumps from drowning a review.
+Cargo.lock text eol=lf linguist-generated=true
+
+# Certificates and keys are generated at run time and gitignored, but declare
+# them binary anyway so that a stray commit cannot mangle them through EOL
+# conversion. PEM is text, yet a CRLF-rewritten key is still a broken key.
+*.crt binary
+*.key binary
+*.pem binary
+
+# Common binary assets, declared pre-emptively: none are tracked today, so this
+# only matters the first time one is added.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.exe binary
