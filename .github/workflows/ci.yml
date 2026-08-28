@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # `cargo test` exits 0 when it discovers nothing, so a refactor that stops
+  # tests being collected would keep CI green while testing nothing. Assert the
+  # count instead. This is a floor, not an exact count: raise it when tests are
+  # added, never lower it to make a red build pass.
+  MIN_TESTS: 36
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -22,10 +29,137 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --locked --all-targets
+      # Guards against a vacuous pass. Runs the suite a second time (cached, so
+      # it is a re-run of the binaries rather than a rebuild) and sums the
+      # per-binary "test result: ok. N passed" lines.
+      - name: Assert the suite is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Summed with awk rather than bc: bc is absent from the Windows runner,
+          # and keeping one implementation avoids the two drifting apart.
+          total=$(cargo test --locked --all-targets 2>&1 \
+            | awk '/^test result: ok\./ { sum += $4 } END { print sum + 0 }')
+          echo "tests passed: ${total} (floor: ${MIN_TESTS})"
+          if [ "${total}" -lt "${MIN_TESTS}" ]; then
+            echo "::error::Expected at least ${MIN_TESTS} passing tests, saw ${total}." \
+                 "Either tests were removed or they stopped being discovered."
+            exit 1
+          fi
       # Benchmarks are compiled but not measured: CI runners are too noisy for
       # meaningful timings. This only guards against a bench that stops building.
       - name: Benchmarks compile
         run: cargo build --locked --benches
+
+  # The measurement harnesses are Windows PowerShell, so a Linux-only matrix
+  # never executes them. That is how the UTF-16LE/BOM defect in the report writer
+  # shipped in the first place: `Tee-Object -FilePath` under PowerShell 5.1 wrote
+  # unparseable JSON while the console output looked correct and the script still
+  # exited 0. This job runs the writers for real and asserts the bytes on disk.
+  harness-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+      # Same floor as the Linux job: a target that only fails to be discovered
+      # on Windows is exactly the kind of gap this job exists to close.
+      - name: Assert the suite is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(cargo test --locked --all-targets 2>&1 \
+            | awk '/^test result: ok\./ { sum += $4 } END { print sum + 0 }')
+          echo "tests passed: ${total} (floor: ${MIN_TESTS})"
+          if [ "${total}" -lt "${MIN_TESTS}" ]; then
+            echo "::error::Expected at least ${MIN_TESTS} passing tests, saw ${total}." \
+                 "Either tests were removed or they stopped being discovered."
+            exit 1
+          fi
+
+      # Deliberately Windows PowerShell 5.1 (`powershell`, not `pwsh`): 5.1 is
+      # the shell whose cmdlets emit the BOM, and it is what a Windows user gets
+      # by default. Checking under pwsh 7 would test the wrong encoder.
+      - name: Benchmark harness writes a BOM-free report
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSVersionTable.PSVersion.ToString()
+          # A small request count: this asserts the writer's encoding, not
+          # performance. No timing from a shared CI runner is published.
+          .\scripts\benchmark.ps1 -Requests 200 -Concurrency 1
+          if ($LASTEXITCODE -ne 0) { throw "benchmark.ps1 exited $LASTEXITCODE" }
+          .\scripts\Assert-TextEncoding.ps1 -Path benchmark/latest.json -Json
+
+      # openssl ships with the hosted Windows runner (Git for Windows), so the
+      # TLS leg exercises scripts/TestCertificate.ps1 too.
+      - name: Benchmark harness writes a BOM-free TLS report
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\benchmark.ps1 -Requests 200 -Concurrency 1 -IncludeTls
+          if ($LASTEXITCODE -ne 0) { throw "benchmark.ps1 -IncludeTls exited $LASTEXITCODE" }
+          .\scripts\Assert-TextEncoding.ps1 `
+            -Path benchmark/latest.json, benchmark/latest-tls.json -Json
+
+      # demo.ps1 blocks on Read-Host until the operator stops it; piping an empty
+      # line satisfies that and unwinds into its finally block, which terminates
+      # the child processes. The generated TOML is the artifact under test.
+      - name: Demo harness writes a BOM-free config
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          "" | .\scripts\demo.ps1 -Upstreams 2 -Tls
+          if ($LASTEXITCODE -ne 0) { throw "demo.ps1 exited $LASTEXITCODE" }
+          .\scripts\Assert-TextEncoding.ps1 -Path demo/edgeproxy.demo.toml
+
+      # Proves the assertion above can fail. A guard that has only ever been seen
+      # to pass is indistinguishable from one that cannot fail, and this one
+      # exists solely to catch a regression, so its failure path is the half that
+      # matters. Writes a BOM-ful file the way the old code did, requires the
+      # check to reject it, and removes it.
+      - name: Assert the encoding check rejects a BOM
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $withBom = New-Object System.Text.UTF8Encoding($true)
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location).Path "bom-canary.json"),
+            "{`n  `"canary`": true`n}`n", $withBom)
+          $head = ([System.IO.File]::ReadAllBytes("bom-canary.json")[0..2] |
+            ForEach-Object { $_.ToString("x2") }) -join " "
+          Write-Host "canary head: $head (expected ef bb bf)"
+          $rejected = $false
+          try { .\scripts\Assert-TextEncoding.ps1 -Path bom-canary.json -Json }
+          catch { $rejected = $true; Write-Host "rejected as expected: $($_.Exception.Message)" }
+          Remove-Item bom-canary.json -Force
+          if (-not $rejected) {
+            throw "Assert-TextEncoding.ps1 accepted a BOM-ful file; the guard is vacuous."
+          }
+
+      # The same argument for the test-count floor: prove it fails below its
+      # floor. `cargo test` with a filter that matches nothing reports 0 passed
+      # and exits 0, which is precisely the vacuous case being guarded against.
+      - name: Assert the test-count floor rejects an empty run
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(cargo test --locked --all-targets -- __no_such_test_name__ 2>&1 \
+            | awk '/^test result: ok\./ { sum += $4 } END { print sum + 0 }')
+          echo "filtered run reported ${total} passing tests (floor: ${MIN_TESTS})"
+          if [ "${total}" -ne 0 ]; then
+            echo "::error::Expected the filtered run to report 0 tests, saw ${total}."
+            exit 1
+          fi
+          if [ "${total}" -ge "${MIN_TESTS}" ]; then
+            echo "::error::The floor did not reject an empty run; the guard is vacuous."
+            exit 1
+          fi
+          echo "floor correctly rejects a run of ${total} tests"
 
   msrv:
     # Raised from 1.78 to 1.86 by criterion 0.7, the highest MSRV among the new
@@ -37,6 +171,42 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build at MSRV
         run: cargo build --locked --all-targets
+
+  # fuzz/ is a separate package with its own lockfile — the root Cargo.toml has
+  # no [workspace], so no other job compiles it and its lockfile is not resolved
+  # by the root build. It had already drifted: the committed fuzz/Cargo.lock
+  # predated the rustls and metrics dependencies, so `--locked` could not
+  # resolve. Build-only, deliberately: no campaign is run here, because a
+  # fixed-budget fuzz run in CI is either too short to find anything or long
+  # enough to make every build flaky.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # libfuzzer-sys needs -Z sanitizer, so this is the one nightly job.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+      # Asserts the committed fuzz/Cargo.lock still resolves. This is the check
+      # that catches the drift described above, and it fails fast without needing
+      # cargo-fuzz or a sanitizer build.
+      - name: Assert the fuzz lockfile is current
+        working-directory: fuzz
+        run: cargo check --locked --all-targets
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Compiles the target with the sanitizer instrumentation it will actually
+      # run under, which `cargo check` alone does not exercise.
+      - name: Build fuzz targets
+        run: cargo fuzz build --dev
+      # A few seconds of fuzzing: enough to prove the harness starts, links, and
+      # executes the target against real input, without a time budget that makes
+      # the job flaky. -runs is bounded, not wall-clock, so it is deterministic.
+      - name: Smoke the fuzz target
+        run: cargo fuzz run --dev request_parser -- -runs=2000 -max_total_time=30
 
   container:
     # Builds the container image for real so the Dockerfile cannot bit-rot
