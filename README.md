@@ -100,6 +100,12 @@ dominate:
 cargo bench
 ```
 
+Parsing a typical request head costs 3.80 us (95% CI [3.63–4.01]) and picking an
+upstream 64.8 ns [61.5–67.3] — three orders of magnitude below the handshake cost
+above, which is why that TLS figure is measuring cryptography and not proxy
+overhead. The full table, with a confidence interval per row, is in
+[benchmark/RESULTS.md](benchmark/RESULTS.md#microbenchmarks).
+
 ## TLS
 
 TLS is optional. Omit the `[tls]` section and edgeproxy runs exactly as before,

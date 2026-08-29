@@ -95,26 +95,36 @@ next steps — or a machine with a widened port range.
 
 ## Microbenchmarks
 
-`criterion` medians, which avoid the socket and scheduler noise above entirely:
+`criterion` medians, which avoid the socket and scheduler noise above entirely.
+Each row is criterion's median point estimate over 100 samples, with its **95%
+bootstrap confidence interval** for that median in brackets — the same
+"envelope, not a point claim" treatment the TLS figures get, from criterion's own
+interval data rather than from repeated whole-run invocations:
 
-| Benchmark | Median |
-| --- | ---: |
-| `parse_request_head/accept/minimal` | 734 ns |
-| `parse_request_head/accept/typical_browser` | 3.80 us |
-| `parse_request_head/accept/post_with_body` | 2.66 us |
-| `parse_request_head/reject/missing_host` | 743 ns |
-| `parse_request_head/reject/cl_plus_te` | 2.53 us |
-| `parse_request_head/reject/duplicate_content_length` | 1.42 us |
-| `parse_request_head_header_count/4` | 2.14 us |
-| `parse_request_head_header_count/60` | 19.78 us |
-| `load_balancer_select/round_robin/32` | 64.8 ns |
-| `load_balancer_select/least_connections/32` | 191 ns |
-| `load_balancer_select_degraded/round_robin/31_of_32_open` | 1.25 us |
+| Benchmark | Median | 95% CI | Samples |
+| --- | ---: | ---: | ---: |
+| `parse_request_head/accept/minimal` | 734 ns | [701–779] | 100 |
+| `parse_request_head/accept/typical_browser` | 3.80 us | [3.63–4.01] | 100 |
+| `parse_request_head/accept/post_with_body` | 2.66 us | [2.50–2.74] | 100 |
+| `parse_request_head/reject/missing_host` | 743 ns | [710–769] | 100 |
+| `parse_request_head/reject/cl_plus_te` | 2.53 us | [2.23–3.11] | 100 |
+| `parse_request_head/reject/duplicate_content_length` | 1.42 us | [1.36–1.54] | 100 |
+| `parse_request_head_header_count/4` | 2.14 us | [1.95–2.27] | 100 |
+| `parse_request_head_header_count/60` | 19.78 us | [17.86–21.23] | 100 |
+| `load_balancer_select/round_robin/32` | 64.8 ns | [61.5–67.3] | 100 |
+| `load_balancer_select/least_connections/32` | 191 ns | [178–199] | 100 |
+| `load_balancer_select_degraded/round_robin/31_of_32_open` | 1.25 us | [1.17–1.32] | 100 |
 
-Parsing a typical request head costs ~3.8 us and picking an upstream ~65 ns,
-against a ~2.3 ms TLS handshake. Per-request CPU in the proxy's own code is
-roughly three orders of magnitude below the handshake cost, so the TLS figure
-above is measuring cryptography, not proxy overhead.
+Each CI is in the same unit as the median beside it. These intervals are much
+tighter than the load-generator envelopes above — a few percent rather than 7x —
+because criterion measures in-process CPU work with no socket, no scheduler
+hand-off, and no port table involved.
+
+Parsing a typical request head costs 3.80 us [3.63–4.01] and picking an upstream
+64.8 ns [61.5–67.3], against a ~2.3 ms TLS handshake. Per-request CPU in the
+proxy's own code is roughly three orders of magnitude below the handshake cost —
+a gap far wider than either envelope — so the TLS figure above is measuring
+cryptography, not proxy overhead.
 
 ## Corrections to previously published figures
 
@@ -136,8 +146,10 @@ comparable in the first place:
 3. They predate TLS termination, so they cannot serve as the plaintext baseline
    for a TLS comparison. That is what the serial figures above are for.
 
-No number in this file is a point claim; every one is a median over at least 6
-paired runs with its min/max envelope shown.
+No number in this file is a point claim. Every load-generator figure is a median
+over at least 6 paired runs with its min/max envelope shown; every
+microbenchmark figure is a criterion median over 100 samples with its 95%
+confidence interval shown.
 
 ## Measurement caveats
 
