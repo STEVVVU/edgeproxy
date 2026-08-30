@@ -101,10 +101,11 @@ cargo bench
 ```
 
 Parsing a typical request head costs 3.80 us (95% CI [3.63–4.01]) and picking an
-upstream 64.8 ns [61.5–67.3] — three orders of magnitude below the handshake cost
+upstream 64.8 ns [61.5–67.3] — 605x and ~35,000x below the ~2.3 ms handshake cost
 above, which is why that TLS figure is measuring cryptography and not proxy
-overhead. The full table, with a confidence interval per row, is in
-[benchmark/RESULTS.md](benchmark/RESULTS.md#microbenchmarks).
+overhead. The published table, with a confidence interval per row, is in
+[benchmark/RESULTS.md](benchmark/RESULTS.md#microbenchmarks); it covers 11 of the
+suite's 18 parameterized cases, and that file says which are missing and why.
 
 ## TLS
 

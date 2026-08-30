@@ -55,12 +55,15 @@ response. It is a per-*connection* cost, not a per-*request* one — it looks
 expensive in this benchmark precisely because the proxy's connection-per-request
 model amortizes it over exactly one request. Connection reuse or session
 resumption would spread it across many; neither is implemented (see the design
-boundaries in the README). Two-thirds added to a 4 ms request is a real and
-honest number for this workload, and it is also the workload least favourable to
-TLS that this proxy can produce.
+boundaries in the README). About 58% added to a 4 ms request (+2.30 ms on
+3.97 ms) is a real and honest number for this workload, and it is also the
+workload least favourable to TLS that this proxy can produce.
 
-Throughput falls ~15% rather than ~65% because at concurrency 1 the client, not
-the proxy, is the bottleneck for part of each cycle.
+Throughput falls only ~15% (142 → 120 req/s), well short of what the latency
+delta alone would predict: throughput scaling purely with p50 latency would fall
+*to* 3.97/6.27 = ~63% of the plaintext rate, i.e. *by* ~37%. It falls by ~15%
+instead because at concurrency 1 the client, not the proxy, is the bottleneck for
+part of each cycle.
 
 ## What could not be measured here: concurrent load
 
@@ -96,10 +99,36 @@ next steps — or a machine with a widened port range.
 ## Microbenchmarks
 
 `criterion` medians, which avoid the socket and scheduler noise above entirely.
-Each row is criterion's median point estimate over 100 samples, with its **95%
-bootstrap confidence interval** for that median in brackets — the same
+Each row below is criterion's median point estimate over 100 samples, with its
+**95% bootstrap confidence interval** for that median in brackets — the same
 "envelope, not a point claim" treatment the TLS figures get, from criterion's own
-interval data rather than from repeated whole-run invocations:
+interval data rather than from repeated whole-run invocations.
+
+**This table is a subset: `cargo bench` runs 18 parameterized cases and 11 are
+published here.** The 7 omitted cases are `parse_request_head_header_count/16`
+and `/32`; `load_balancer_select/round_robin/2` and `/8`;
+`load_balancer_select/least_connections/2` and `/8`; and
+`load_balancer_select_degraded/least_connections/31_of_32_open`. They are omitted
+for one reason only: `target/criterion/` is gitignored, so no `estimates.json`
+for them is committed to this repository, and transcribing numbers from an
+untracked local artifact would publish figures no reader could check. The
+omitted values are therefore unknown to this document — nothing here is asserted
+about them, in either direction. Read the table as "these 11 have a recorded
+estimate", not "these 11 characterize the benchmark suite".
+
+Two consequences worth stating plainly:
+
+- The two header-count rows kept are the **endpoints** (4 and 60 headers). They
+  bound the range; they do **not** test the *shape* of the scaling, because the
+  two interior points that would (`/16`, `/32`) are among the omitted. No claim
+  about linear scaling in header count is made or supported here.
+- The load-balancer rows kept are all at a 32-upstream pool, so the
+  round-robin-vs-least-connections gap below is a single-pool-size comparison,
+  not a measured curve over pool size.
+
+Republishing with `target/criterion/` committed — or with the estimates copied
+into this directory as a tracked artifact — is the fix, and is the reason this
+disclosure is here rather than a filled-in table.
 
 | Benchmark | Median | 95% CI | Samples |
 | --- | ---: | ---: | ---: |
@@ -121,10 +150,10 @@ because criterion measures in-process CPU work with no socket, no scheduler
 hand-off, and no port table involved.
 
 Parsing a typical request head costs 3.80 us [3.63–4.01] and picking an upstream
-64.8 ns [61.5–67.3], against a ~2.3 ms TLS handshake. Per-request CPU in the
-proxy's own code is roughly three orders of magnitude below the handshake cost —
-a gap far wider than either envelope — so the TLS figure above is measuring
-cryptography, not proxy overhead.
+64.8 ns [61.5–67.3], against a ~2.3 ms TLS handshake. That is **605x** for the
+parse and **~35,000x** for the selection — between two and four and a half orders
+of magnitude below the handshake cost, a gap far wider than either envelope — so
+the TLS figure above is measuring cryptography, not proxy overhead.
 
 ## Corrections to previously published figures
 
@@ -147,9 +176,13 @@ comparable in the first place:
    for a TLS comparison. That is what the serial figures above are for.
 
 No number in this file is a point claim. Every load-generator figure is a median
-over at least 6 paired runs with its min/max envelope shown; every
-microbenchmark figure is a criterion median over 100 samples with its 95%
-confidence interval shown.
+over at least 6 paired runs with its min/max envelope shown, and every
+microbenchmark figure *that is published* is a criterion median over 100 samples
+with its 95% confidence interval shown. That is a statement about the figures
+present, not about coverage: as noted under
+[Microbenchmarks](#microbenchmarks), 11 of the suite's 18 parameterized cases are
+published, because criterion's output directory is gitignored and the rest have no
+committed estimate to quote.
 
 ## Measurement caveats
 
