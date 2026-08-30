@@ -1,8 +1,8 @@
-# edgeproxy
+# HTTP Reverse Proxy
 
-`edgeproxy` is a bounded, observable Layer-7 reverse proxy/load balancer written in
-Rust and Tokio. It implements a deliberately narrow HTTP/1.1 profile so request
-framing, retry safety, and overload behavior remain explicit and testable.
+An asynchronous HTTP/1.1 reverse proxy and load balancer written in Rust and
+Tokio. It routes requests across healthy upstreams and supports TLS, retries,
+health checks, and bounded concurrency.
 
 This is an infrastructure engineering project, not a claim of feature parity
 with HAProxy, Envoy, or nginx.
