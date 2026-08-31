@@ -27,6 +27,14 @@ Dockerfile.* text eol=lf
 # bumps from drowning a review.
 Cargo.lock text eol=lf linguist-generated=true
 
+# criterion's own output, copied verbatim out of the gitignored target/ so that
+# the published medians have a committed artifact. LF-only as criterion wrote
+# them (verified: not one contains a CR), so declaring eol=lf here cannot
+# renormalize the bytes. Marked generated for the same reason as the lockfiles:
+# these are evidence for scripts/check_documented_metrics.py to check, not code
+# to read in a diff.
+benchmark/criterion/**/*.json text eol=lf linguist-generated=true
+
 # Certificates and keys are generated at run time and gitignored, but declare
 # them binary anyway so that a stray commit cannot mangle them through EOL
 # conversion. PEM is text, yet a CRLF-rewritten key is still a broken key.

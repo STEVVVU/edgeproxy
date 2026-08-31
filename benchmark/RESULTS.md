@@ -104,31 +104,45 @@ Each row below is criterion's median point estimate over 100 samples, with its
 "envelope, not a point claim" treatment the TLS figures get, from criterion's own
 interval data rather than from repeated whole-run invocations.
 
-**This table is a subset: `cargo bench` runs 18 parameterized cases and 11 are
-published here.** The 7 omitted cases are `parse_request_head_header_count/16`
-and `/32`; `load_balancer_select/round_robin/2` and `/8`;
-`load_balancer_select/least_connections/2` and `/8`; and
-`load_balancer_select_degraded/least_connections/31_of_32_open`. They are omitted
-for one reason only: `target/criterion/` is gitignored, so no `estimates.json`
-for them is committed to this repository, and transcribing numbers from an
-untracked local artifact would publish figures no reader could check. The
-omitted values are therefore unknown to this document — nothing here is asserted
-about them, in either direction. Read the table as "these 11 have a recorded
-estimate", not "these 11 characterize the benchmark suite".
+**All 18 of the suite's parameterized cases are published below, and each one is
+backed by a committed artifact.** An earlier version of this file published only
+11 and disclosed the other 7 as omitted, because `target/criterion/` is
+gitignored and transcribing numbers from an untracked local artifact would
+publish figures no reader could check. The estimates from that same measurement
+pass are now committed under
+[`benchmark/criterion/`](criterion) — one directory per case, holding
+criterion's own `estimates.json`, `benchmark.json`, and `sample.json` copied
+verbatim. `/target/` stays gitignored; only the small JSON estimates were
+copied out.
 
-Two consequences worth stating plainly:
+So every row here is checkable: the median, both confidence bounds, and the
+sample count each come from a file in this repository, and
+`scripts/check_documented_metrics.py` fails CI if any row drifts from its
+artifact or if any committed artifact stops being published. The 11 previously
+published medians are unchanged — the 7 new rows were added beside them, none
+was revised.
 
-- The two header-count rows kept are the **endpoints** (4 and 60 headers). They
-  bound the range; they do **not** test the *shape* of the scaling, because the
-  two interior points that would (`/16`, `/32`) are among the omitted. No claim
-  about linear scaling in header count is made or supported here.
-- The load-balancer rows kept are all at a 32-upstream pool, so the
-  round-robin-vs-least-connections gap below is a single-pool-size comparison,
-  not a measured curve over pool size.
+The two interior header-count points (`/16`, `/32`) were the substantive loss,
+because without them the table showed only the endpoints and so could not speak
+to the *shape* of the scaling at all. With all four points:
 
-Republishing with `target/criterion/` committed — or with the estimates copied
-into this directory as a tracked artifact — is the fix, and is the reason this
-disclosure is here rather than a filled-in table.
+- Cost per additional header, taken between successive medians, is 262 ns
+  (4→16), 313 ns (16→32), and 339 ns (32→60). The trend is upward, but
+  propagating the confidence bounds through the same subtraction gives
+  228–315 ns for the first interval against 247–410 ns for the last: the ranges
+  overlap, so **this data does not resolve a superlinear term**, and none is
+  claimed. What it does support is that growth is close to proportional in
+  header count over 4–60 headers.
+- The total is *sub*-proportional — 15x the headers costs 9.25x the time
+  (2.14 us → 19.78 us) — which is the fixed per-request part of the parse
+  (request line, framing checks, allocation) being amortized over more headers.
+- Pool size now has a curve rather than a single point. `round_robin` is flat
+  across 2/8/32 upstreams (60.8 / 63.1 / 64.8 ns, all three intervals
+  overlapping) as an index increment should be. `least_connections` is flat from
+  2 to 8 (74.2 / 75.3 ns, overlapping) and then 2.5x higher at 32 (191 ns,
+  no overlap), consistent with its scan over upstreams only becoming visible
+  once the pool is large enough to dominate the fixed cost. Two pool sizes
+  would not have distinguished those two shapes; three do.
 
 | Benchmark | Median | 95% CI | Samples |
 | --- | ---: | ---: | ---: |
@@ -139,10 +153,17 @@ disclosure is here rather than a filled-in table.
 | `parse_request_head/reject/cl_plus_te` | 2.53 us | [2.23–3.11] | 100 |
 | `parse_request_head/reject/duplicate_content_length` | 1.42 us | [1.36–1.54] | 100 |
 | `parse_request_head_header_count/4` | 2.14 us | [1.95–2.27] | 100 |
+| `parse_request_head_header_count/16` | 5.28 us | [5.00–5.73] | 100 |
+| `parse_request_head_header_count/32` | 10.28 us | [9.74–10.95] | 100 |
 | `parse_request_head_header_count/60` | 19.78 us | [17.86–21.23] | 100 |
+| `load_balancer_select/round_robin/2` | 60.8 ns | [57.7–63.8] | 100 |
+| `load_balancer_select/round_robin/8` | 63.1 ns | [58.2–65.0] | 100 |
 | `load_balancer_select/round_robin/32` | 64.8 ns | [61.5–67.3] | 100 |
+| `load_balancer_select/least_connections/2` | 74.2 ns | [69.5–76.0] | 100 |
+| `load_balancer_select/least_connections/8` | 75.3 ns | [71.8–80.2] | 100 |
 | `load_balancer_select/least_connections/32` | 191 ns | [178–199] | 100 |
 | `load_balancer_select_degraded/round_robin/31_of_32_open` | 1.25 us | [1.17–1.32] | 100 |
+| `load_balancer_select_degraded/least_connections/31_of_32_open` | 2.38 us | [2.25–2.50] | 100 |
 
 Each CI is in the same unit as the median beside it. These intervals are much
 tighter than the load-generator envelopes above — a few percent rather than 7x —
@@ -177,12 +198,14 @@ comparable in the first place:
 
 No number in this file is a point claim. Every load-generator figure is a median
 over at least 6 paired runs with its min/max envelope shown, and every
-microbenchmark figure *that is published* is a criterion median over 100 samples
-with its 95% confidence interval shown. That is a statement about the figures
-present, not about coverage: as noted under
-[Microbenchmarks](#microbenchmarks), 11 of the suite's 18 parameterized cases are
-published, because criterion's output directory is gitignored and the rest have no
-committed estimate to quote.
+microbenchmark figure is a criterion median over 100 samples with its 95%
+confidence interval shown. Coverage is now complete on the microbenchmark side:
+all 18 of the suite's parameterized cases are published, each against a
+committed estimate under [`benchmark/criterion/`](criterion), and
+`scripts/check_documented_metrics.py` enforces that in CI. The load-generator
+side is still deliberately partial — no concurrent figure is published at all,
+for the reasons under
+[What could not be measured here](#what-could-not-be-measured-here-concurrent-load).
 
 ## Measurement caveats
 

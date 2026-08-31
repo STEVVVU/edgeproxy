@@ -23,6 +23,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # For scripts/check_documented_metrics.py below. Pinned rather than relying
+      # on the runner image's default, which provides `python3` but not always
+      # `python`, and which moves without notice.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -50,6 +56,53 @@ jobs:
       # meaningful timings. This only guards against a bench that stops building.
       - name: Benchmarks compile
         run: cargo build --locked --benches
+
+      # criterion writes into target/, which is gitignored, so for a while every
+      # median in benchmark/RESULTS.md had no committed producer and no committed
+      # artifact: a reader could check nothing, and nothing would notice an edited
+      # figure. The estimates for all 18 cases are committed under
+      # benchmark/criterion/ now, and this asserts the table still agrees with
+      # them. It measures nothing and does not run cargo bench.
+      - name: Check the published medians against the committed estimates
+        run: python scripts/check_documented_metrics.py
+
+      # Proves the check above can fail, for the same reason the encoding and
+      # test-count guards carry one: a guard only ever observed to pass is
+      # indistinguishable from a guard that cannot fail, and an unbacked table row
+      # is precisely what this one exists to catch. Perturbs one published median
+      # by a single displayed digit, requires a non-zero exit, then restores the
+      # file and requires a zero exit.
+      - name: Assert the metrics check rejects a perturbed median
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp benchmark/RESULTS.md "${RUNNER_TEMP}/RESULTS.md.orig"
+          restore() { cp "${RUNNER_TEMP}/RESULTS.md.orig" benchmark/RESULTS.md; }
+          trap restore EXIT
+          # newline="" on both sides so the rewrite cannot introduce CRLF and
+          # fail for an unrelated reason.
+          python - <<'PY'
+          import io
+          path = "benchmark/RESULTS.md"
+          text = io.open(path, encoding="utf-8", newline="").read()
+          old, new = "| 5.28 us | [5.00–5.73] |", "| 5.29 us | [5.00–5.73] |"
+          if old not in text:
+              raise SystemExit(
+                  "canary: the header_count/16 row is not in its expected form, so "
+                  "this negative test would perturb nothing. Update the literal."
+              )
+          io.open(path, "w", encoding="utf-8", newline="").write(text.replace(old, new, 1))
+          PY
+          if python scripts/check_documented_metrics.py; then
+            echo "::error::The metrics check accepted a perturbed median;" \
+                 "the guard is vacuous."
+            exit 1
+          fi
+          echo "perturbed median correctly rejected"
+          restore
+          trap - EXIT
+          python scripts/check_documented_metrics.py
+          echo "restored file correctly accepted"
 
   # The measurement harnesses are Windows PowerShell, so a Linux-only matrix
   # never executes them. That is how the UTF-16LE/BOM defect in the report writer

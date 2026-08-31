@@ -104,8 +104,12 @@ Parsing a typical request head costs 3.80 us (95% CI [3.63–4.01]) and picking 
 upstream 64.8 ns [61.5–67.3] — 605x and ~35,000x below the ~2.3 ms handshake cost
 above, which is why that TLS figure is measuring cryptography and not proxy
 overhead. The published table, with a confidence interval per row, is in
-[benchmark/RESULTS.md](benchmark/RESULTS.md#microbenchmarks); it covers 11 of the
-suite's 18 parameterized cases, and that file says which are missing and why.
+[benchmark/RESULTS.md](benchmark/RESULTS.md#microbenchmarks); it covers all 18 of
+the suite's parameterized cases, and each row is backed by criterion's own
+estimate committed under [benchmark/criterion/](benchmark/criterion), so the
+figures can be checked without re-running the suite.
+`scripts/check_documented_metrics.py` fails CI if a published row and its
+artifact ever disagree.
 
 ## TLS
 
